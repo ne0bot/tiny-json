@@ -4,6 +4,10 @@ unit JSON;
 
 // 16-Jul-2011  v1.1 - first public version
 // 18-Jul-2011  v1.2 - modified to use output memory buffer instead of TStringStream for JSON-to-text
+// 18-Jul-2011  v1.2.1 
+//                   - fixed bug in Mem_Write - 1st argument of Move() should be dereferenced pointer
+//                   - empty arrays in PHP are always encoded as List, so TJSONlist.GetField() for empty
+//                     lists does not throw exception
 
 interface
 
@@ -186,13 +190,13 @@ begin
   end;
 end;
 
-procedure mem_write(const rs: AnsiString; var mem:TMemBuf);
+procedure mem_write(const s: AnsiString; var mem:TMemBuf);
 var
   Len,Room: Integer;
   p:PAnsiChar;
 begin
-  Len:=Length(rs);
-  p:=@rs[1];
+  Len:=Length(s);
+  p:=@s[1];
   while Len>0 Do
   begin
     with mem Do
@@ -201,7 +205,7 @@ begin
       Room:=p2 - p1;
     end;
     if Room > Len then Room:=Len;
-    Move(p,mem.p1^,Room);
+    Move(p^,mem.p1^,Room);
     Dec(Len,Room);
     Inc(p,Room);
     Inc(mem.p1,Room);
@@ -494,7 +498,7 @@ Begin
   Case FType Of
     jsNull:   mem_write('null',mem);
     jsBool:   if FValue then mem_write('true',mem) else mem_write('false',mem);
-    jsInt:    mem_write(IntToStr(TVarData(FValue).VInt64),mem);
+    jsInt:    mem_write(IntToStr64(TVarData(FValue).VInt64),mem);
     jsFloat:  mem_write(FloatToStr(TVarData(FValue).VDouble,fmt),mem);
     jsString: EscapeString(TVarData(FValue).VOleStr,mem);
   Else raise TJSONError.Create(JR_BAD_TXT);
@@ -702,7 +706,10 @@ end;
 
 Function TJSONlist.GetField(const Key:WideString):TJSONbase;
 Begin
-  raise TJSONError.Create(JR_LIST_NAME);
+  // empty associative arrays are shown as empty list by PHP
+  // so we do not raise exception in such a case
+  if Count=0 then Result:=Nil
+    else raise TJSONError.Create(JR_LIST_NAME);
 end;
 
 procedure TJSONlist.SetField(const Key:WideString; AValue:TJSONbase);
