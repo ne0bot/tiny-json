@@ -3,6 +3,7 @@ unit JSON;
 // Written by IVO GELOV
 
 // 16-Jul-2011  v1.1 - first public version
+// 18-Jul-2011  v1.2 - modified to use output memory buffer instead of TStringStream for JSON-to-text
 
 interface
 
@@ -10,6 +11,11 @@ uses SysUtils,Classes,Contnrs,Hashes;
 
 Type
   TJSONtype = (jsNull, jsBool, jsInt, jsFloat, jsString, jsList, jsObject);
+
+  TMemBuf = record
+    p0,p1,p2:PAnsiChar;
+    pLen:Cardinal;
+  end;
 
   TJSONError = class(Exception)
   end;
@@ -26,7 +32,7 @@ Type
     Function GetValue:Variant; Virtual;
     procedure SetValue(AValue:Variant); Virtual;
     function GetJSON:AnsiString; Virtual;
-    Procedure GetJSONBuf(st:TStringStream); Virtual;
+    procedure GetJSONBuf(var mem:TMemBuf); virtual;
     Function GetItem(Index:Integer):TJSONbase; Virtual;
     Procedure SetItem(Index:Integer;AValue:TJSONbase); Virtual;
     function GetField(const Key:WideString): TJSONbase; Virtual;
@@ -67,7 +73,7 @@ Type
   Protected
     Function GetType:TJSONtype; Override;
     Function GetJSON:AnsiString; Override;
-    Procedure GetJSONBuf(st:TStringStream); Override;
+    Procedure GetJSONBuf(Var mem:TMemBuf); Override;
     function GetField(const Key:WideString): TJSONbase; Override;
     procedure SetField(const Key:WideString;AValue:TJSONbase); Override;
     function GetName(Idx:Integer): WideString; Override;
@@ -93,7 +99,7 @@ Type
     procedure SetField(const Key:WideString;AValue:TJSONbase); Override;
     function GetName(Idx:Integer): WideString; Override;
     Function GetJSON:AnsiString; Override;
-    Procedure GetJSONBuf(st:TStringStream); Override;
+    procedure GetJSONBuf(var mem:TMemBuf); override;
   Public
     constructor Create(AParent:TJSONarray = Nil);
     Destructor Destroy; Override;
@@ -123,7 +129,7 @@ Resourcestring
   JR_NO_COUNT = 'TJSONbase is not an array and does not have Count property';
   JR_PARSE_CHAR = 'Unexpected character at position %d';
   JR_PARSE_EMPTY = 'Empty element at position %d';
-  JR_OPEN_LIST = 'Missing closing ]';
+  JR_OPEN_LIST = 'Missing closing bracket for array';
   JR_OPEN_STRING = 'Unterminated string at position %d';
   JR_NO_COLON = 'Missing property name/value delimiter (:) at position %d';
   JR_NO_VALUE = 'Missing property value at position %d';
@@ -140,38 +146,170 @@ implementation
 
 uses Windows,Variants;
 
-Var
-  fmt:TFormatSettings;
+Const
+  MemDelta = 50000;
 
-Function EscapeString(const s:WideString):AnsiString;
+Var
+  fmt:TFormatSettings; // always use "." for decimal separator
+
+// functions for output buffering in JSON generation
+
+procedure GetMemStart(var mem:TMemBuf);
+Begin
+  with mem do
+  Begin
+    pLen := MemDelta;
+    p0 := AllocMem(pLen);
+    p1 := p0;
+    p2 := p1 + pLen;
+  end;
+end;
+
+procedure GetMoreMemory(var mem:TMemBuf);
+Begin
+  with mem do
+  begin
+    Inc(pLen, MemDelta);
+    ReallocMem(p0, pLen);
+    p2 := p0 + pLen;
+    p1 := p2 - MemDelta;
+  end;
+end;
+
+procedure mem_char(ch: AnsiChar; var mem:TMemBuf);
+begin
+  with mem Do
+  begin
+    if p1 >= p2 then GetMoreMemory(mem);
+    p1^ := ch;
+    Inc(p1);
+  end;
+end;
+
+procedure mem_write(const rs: AnsiString; var mem:TMemBuf);
+var
+  Len,Room: Integer;
+  p:PAnsiChar;
+begin
+  Len:=Length(rs);
+  p:=@rs[1];
+  while Len>0 Do
+  begin
+    with mem Do
+    begin
+      If p1 >= p2 then GetMoreMemory(mem);
+      Room:=p2 - p1;
+    end;
+    if Room > Len then Room:=Len;
+    Move(p,mem.p1^,Room);
+    Dec(Len,Room);
+    Inc(p,Room);
+    Inc(mem.p1,Room);
+  End;
+end;
+
+// string escaping and un-escaping
+
+procedure EscapeString(const s:WideString;var Buf:TMemBuf);
 var
   i:Integer;
+  code:Array[1..4] of AnsiChar;
+
+  procedure Int2Hex(c:Word); Assembler;
+  Asm
+    PUSH EAX
+    SHL EAX,16
+    POP EAX
+    MOV AH,AL
+
+    AND AL,15
+    CMP AL,10
+    CMC
+    ADC AL,'0'
+    DAA
+    MOV [BYTE PTR code+3],AL
+
+    MOV AL,AH
+    SHR AL,4
+    CMP AL,10
+    CMC
+    ADC AL,'0'
+    DAA
+    MOV [BYTE PTR code+2],AL
+
+    SHR EAX,16
+    MOV AL,AH
+    AND AL,15
+    CMP AL,10
+    CMC
+    ADC AL,'0'
+    DAA
+    MOV [BYTE PTR code+1],AL
+
+    MOV AL,AH
+    SHR AL,4
+    CMP AL,10
+    CMC
+    ADC AL,'0'
+    DAA
+    MOV [BYTE PTR code],AL
+  end;
+
 Begin
-  Result:='"';
+  mem_char('"',Buf);
   For i:=1 to Length(s) do
     Case s[i] Of
-      '/', '\', '"': Result:=Result + '\' + s[i];
-      #8: Result:=Result+'\b';
-      #9: Result:=Result+'\t';
-      #10:Result:=Result+'\n';
-      #12:Result:=Result+'\f';
-      #13:Result:=Result+'\r';
+      '/', '\', '"':
+        Begin
+          mem_char('\',Buf);
+          mem_char(AnsiChar(s[i]),Buf);
+        end;
+      #8:
+        Begin
+          mem_char('\',Buf);
+          mem_char('b',Buf);
+        end;
+      #9:
+        Begin
+          mem_char('\',Buf);
+          mem_char('t',Buf);
+        end;
+      #10:
+        Begin
+          mem_char('\',Buf);
+          mem_char('n',Buf);
+        end;
+      #12:
+        Begin
+          mem_char('\',Buf);
+          mem_char('f',Buf);
+        end;
+      #13:
+        Begin
+          mem_char('\',Buf);
+          mem_char('r',Buf);
+        end;
     Else
-      if s[i] in [WideChar(' ') .. WideChar('~')] Then Result:=Result + s[i]
-        else Result:=Result + '\u' + IntToHex(Ord(s[i]),4)
+      if s[i] in [WideChar(' ') .. WideChar('~')] Then mem_char(AnsiChar(s[i]),Buf)
+      else
+      Begin
+        mem_char('\',Buf);
+        mem_char('u',Buf);
+        Int2Hex(Ord(s[i]));
+        mem_write(code,Buf);
+      end;
     end;
-  Result:=Result+'"';
+  mem_char('"',Buf);
 end;
 
 Function UnescapeString(const s:AnsiString):WideString;
 var
-  W:WideString;
   i,j,k,Len:Integer;
   code:string[5];
 Begin
   code:='$    ';
   Len:=Length(s);
-  SetLength(W,Len);
+  SetLength(Result,Len);
   i:=1;
   j:=0;
   While i<=Len do
@@ -184,37 +322,37 @@ Begin
         '"','\','/':
           Begin
             Inc(j);
-            W[j]:=WideChar(s[i]);
+            Result[j]:=WideChar(s[i]);
             Inc(i);
           end;
         'b':
           Begin
             Inc(j);
-            W[j]:=#8;
+            Result[j]:=#8;
             Inc(i);
           end;
         't':
           Begin
             Inc(j);
-            W[j]:=#9;
+            Result[j]:=#9;
             Inc(i);
           end;
         'n':
           Begin
             Inc(j);
-            W[j]:=#10;
+            Result[j]:=#10;
             Inc(i);
           end;
         'f':
           Begin
             Inc(j);
-            W[j]:=#12;
+            Result[j]:=#12;
             Inc(i);
           end;
         'r':
           Begin
             Inc(j);
-            W[j]:=#13;
+            Result[j]:=#13;
             Inc(i);
           end;
         'u':
@@ -227,7 +365,7 @@ Begin
               Else code[k+1]:=s[i+k];
             Inc(j);
             Inc(i,5);
-            W[j]:=WideChar(StrToInt(code));
+            Result[j]:=WideChar(StrToInt(code));
           end;
       Else
         Raise TJSONError.CreateFmt(JR_ESCAPE,[i,s]);
@@ -237,12 +375,12 @@ Begin
     Begin
       if not (s[i] in [#32..#126]) then Raise TJSONError.CreateFmt(JR_UNESCAPED,[i,s]);
       Inc(j);
-      W[j]:=WideChar(s[i]);
+      Result[j]:=WideChar(s[i]);
       Inc(i);
     end;
   End;
-  // now J contains the real length of W in characters
-  Result:=Copy(W,1,J);
+  // now J contains the real length of result in characters
+  SetLength(Result,J);
 end;
 
 // ===== TJSONbase =====
@@ -270,6 +408,8 @@ Begin
 end;
 
 Procedure TJSONbase.SetValue (AValue:Variant);
+var
+  r:Int64;
 Begin
   // clear previous value
   Case VarType(AValue) Of
@@ -284,7 +424,7 @@ Begin
       Begin
         if FType In [jsList, jsObject] then FValue.Free;
         FType:=jsBool;
-        FValue:=AValue;
+        FValue:=Boolean(AValue);
       end;
     varShortInt,
     varByte,
@@ -296,7 +436,8 @@ Begin
       Begin
         if FType In [jsList, jsObject] then FValue.Free;
         FType:=jsInt;
-        FValue:=AValue;
+        r:=AValue;
+        FValue:=r; // compiler does not allow direct assignment
       end;
     varCurrency,
     varSingle,
@@ -304,7 +445,7 @@ Begin
       Begin
         if FType In [jsList, jsObject] then FValue.Free;
         FType:=jsFloat;
-        FValue:=AValue;
+        FValue:=Double(AValue);
       end;
     varOleStr,
     varStrArg,
@@ -312,7 +453,7 @@ Begin
       Begin
         if FType In [jsList, jsObject] then FValue.Free;
         FType:=jsString;
-        FValue:=AValue;
+        FValue:=WideString(AValue);
       end;
     varByRef:
       if TObject(TVarData(AValue).VPointer) is TJSONlist Then
@@ -333,20 +474,31 @@ Begin
 end;
 
 Function TJSONbase.GetJSON:AnsiString;
+var
+  Buf:TMemBuf;
 Begin
-  Case FType Of
-    jsNull:   Result:='null';
-    jsBool:   if FValue then Result:='true' else Result:='false';
-    jsInt:    Result:=IntToStr(FValue);
-    jsFloat:  Result:=Format('%g',[Double(FValue)],fmt);
-    jsString: Result:=EscapeString(FValue);
-  Else raise TJSONError.Create(JR_BAD_TXT);
+  Result:='';
+  Buf.p0:=Nil;
+  GetMemStart(Buf);
+  Try
+    GetJSONBuf(Buf);
+    mem_char(#0,Buf);
+    Result:=AnsiString(Buf.p0);
+  Finally
+    FreeMem(Buf.p0);
   end;
 end;
 
-Procedure TJSONbase.GetJSONBuf(st:TStringStream);
+Procedure TJSONbase.GetJSONBuf(var mem:TMemBuf);
 Begin
-  st.WriteString(GetJSON);
+  Case FType Of
+    jsNull:   mem_write('null',mem);
+    jsBool:   if FValue then mem_write('true',mem) else mem_write('false',mem);
+    jsInt:    mem_write(IntToStr(TVarData(FValue).VInt64),mem);
+    jsFloat:  mem_write(FloatToStr(TVarData(FValue).VDouble,fmt),mem);
+    jsString: EscapeString(TVarData(FValue).VOleStr,mem);
+  Else raise TJSONError.Create(JR_BAD_TXT);
+  end;
 end;
 
 Function TJSONbase.GetCount:Integer;
@@ -379,7 +531,7 @@ Begin
   Raise TJSONError.Create(JR_NO_INDEX);
 end;
 
-// ===== TJSONlist =====
+// ===== TJSONarray =====
 
 Constructor TJSONarray.Create(AParent:TJSONarray);
 Begin
@@ -469,32 +621,34 @@ Begin
 end;
 
 function TJSONlist.GetJSON:AnsiString;
-Var
-  Buf:TStringStream;
+var
+  Buf:TMemBuf;
 Begin
-  Buf:=TStringStream.Create('');
+  Buf.p0:=Nil;
+  GetMemStart(Buf);
   try
     GetJSONBuf(Buf);
-    Result:=Buf.DataString;
+    mem_char(#0,Buf);
+    Result:=AnsiString(Buf.p0);
   Finally
-    Buf.Free;
+    FreeMem(Buf.p0);
   end;
 end;
 
-procedure TJSONlist.GetJSONBuf(st:TStringStream);
+procedure TJSONlist.GetJSONBuf(Var mem:TMemBuf);
 var
   i:Integer;
   comma:Boolean;
 Begin
-  st.WriteString('[');
+  mem_char('[',mem);
   comma:=False;
   for i:=0 to FItems.Count-1 Do
   Begin
-    If comma then st.WriteString(',')
+    If comma then mem_char(',',mem)
       else comma:=True;
-    TJSONbase(FItems[i]).GetJSONBuf(st);
+    TJSONbase(FItems[i]).GetJSONBuf(mem);
   end;
-  st.WriteString(']');
+  mem_char(']',mem);
 end;
 
 procedure TJSONlist.Add(B:Boolean);
@@ -657,33 +811,36 @@ Begin
 end;
 
 function TJSONobject.GetJSON:AnsiString;
-Var
-  Buf:TStringStream;
+var
+  Buf:TMemBuf;
 Begin
-  Buf:=TStringStream.Create('');
+  Buf.p0:=Nil;
+  GetMemStart(Buf);
   try
     GetJSONBuf(Buf);
-    Result:=Buf.DataString;
+    mem_char(#0,Buf);
+    Result:=AnsiString(Buf.p0);
   Finally
-    Buf.Free;
+    FreeMem(Buf.p0);
   end;
 end;
 
-procedure TJSONobject.GetJSONBuf(st:TStringStream);
+procedure TJSONobject.GetJSONBuf(var mem:TMemBuf);
 var
   i:Integer;
   comma:Boolean;
 Begin
-  st.WriteString('{');
+  mem_char('{',mem);
   comma:=False;
   for i:=0 to FItems.Count-1 Do
   Begin
-    If comma then st.WriteString(',')
+    If comma then mem_char(',',mem)
       else comma:=True;
-    st.WriteString(EscapeString(FNames[i])+':');
-    TJSONbase(FItems[i]).GetJSONBuf(st);
+    EscapeString(FNames[i],mem);
+    mem_char(':',mem);
+    TJSONbase(FItems[i]).GetJSONBuf(mem);
   end;
-  st.WriteString('}');
+  mem_char('}',mem);
 end;
 
 procedure TJSONobject.Add(Key:WideString;B:Boolean);
