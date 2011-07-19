@@ -8,6 +8,7 @@ unit JSON;
 //                   - fixed bug in Mem_Write - 1st argument of Move() should be dereferenced pointer
 //                   - empty arrays in PHP are always encoded as List, so TJSONlist.GetField() for empty
 //                     lists does not throw exception
+// 19-Jul-2011  v1.2.2 - fixed bug in Int2Hex (PUSH/POP EAX should be PUSH/POP AX)
 
 interface
 
@@ -221,9 +222,9 @@ var
 
   procedure Int2Hex(c:Word); Assembler;
   Asm
-    PUSH EAX
+    PUSH AX
     SHL EAX,16
-    POP EAX
+    POP AX
     MOV AH,AL
 
     AND AL,15
