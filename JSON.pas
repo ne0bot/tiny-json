@@ -4,11 +4,17 @@ unit JSON;
 
 // 16-Jul-2011  v1.1 - first public version
 // 18-Jul-2011  v1.2 - modified to use output memory buffer instead of TStringStream for JSON-to-text
-// 18-Jul-2011  v1.2.1 
+// 18-Jul-2011  v1.2.1
 //                   - fixed bug in Mem_Write - 1st argument of Move() should be dereferenced pointer
 //                   - empty arrays in PHP are always encoded as List, so TJSONlist.GetField() for empty
 //                     lists does not throw exception
 // 19-Jul-2011  v1.2.2 - fixed bug in Int2Hex (PUSH/POP EAX should be PUSH/POP AX)
+// 12-Aug-2011  v1.2.3
+//                   - added TJSONlist.Remove and TJSONobject.Remove
+//                   - added TJSONlist.Clear and TJSONobject.Clear
+// 18-Aug-2011  v1.3
+//                   - fixed error in Int2Hex (wrong usage of outer variable CODE)
+//                   - replaced TObjectList with TList, because otherwise REMOVE methods did not function properly
 
 interface
 
@@ -58,12 +64,12 @@ Type
 
   TJSONIterator = procedure (ElName:WideString; Elem:TJSONbase; Data:Pointer; Var Stop:Boolean);
   TJSONIteratorObj = procedure (ElName:WideString; Elem:TJSONbase; Data:Pointer; Var Stop:Boolean) Of Object;
-  TJSONlistIterator = procedure (Idx:Integer; Elem:TJSONbase; Data:Pointer; Var Stop:Boolean);
-  TJSONlistIteratorObj = procedure (Idx:Integer; Elem:TJSONbase; Data:Pointer; Var Stop:Boolean) Of Object;
+  TJSONEnum = procedure (Idx:Integer; Elem:TJSONbase; Data:Pointer; Var Stop:Boolean);
+  TJSONEnumObj = procedure (Idx:Integer; Elem:TJSONbase; Data:Pointer; Var Stop:Boolean) Of Object;
 
   TJSONarray = class(TJSONbase)
   Protected
-    FItems:TObjectList;
+    FItems:TList;
     Function GetValue:Variant; Override;
     procedure SetValue(AValue:Variant); Override;
     Function GetItem(Index:Integer):TJSONbase; Override;
@@ -72,6 +78,9 @@ Type
   Public
     constructor Create(AParent:TJSONarray = Nil);
     Destructor Destroy; Override;
+    procedure Clear; Virtual; Abstract;
+    Procedure ForEach(Iterator:TJSONIterator;UserData:Pointer); Overload; Virtual; Abstract;
+    Procedure ForEach(Iterator:TJSONIteratorObj;UserData:Pointer); Overload; Virtual; Abstract;
   end;
 
   TJSONlist = class(TJSONarray)
@@ -84,9 +93,13 @@ Type
     function GetName(Idx:Integer): WideString; Override;
   Public
     constructor Create(AParent:TJSONarray = Nil);
-    Procedure Delete(Idx:Integer); Virtual;
-    Procedure ForEach(Iterator:TJSONlistIterator;UserData:Pointer); Overload;
-    Procedure ForEach(Iterator:TJSONlistIteratorObj;UserData:Pointer); Overload;
+    Procedure Delete(Idx:Integer); // delete element and free the object
+    function Remove(Idx:Integer):TJSONbase; // remove element from list and return reference to object
+    Procedure Clear; Override;
+    Procedure ForEach(Iterator:TJSONEnum;UserData:Pointer); Overload;
+    Procedure ForEach(Iterator:TJSONEnumObj;UserData:Pointer); Overload;
+    Procedure ForEach(Iterator:TJSONIterator;UserData:Pointer); Overload; Override;
+    Procedure ForEach(Iterator:TJSONIteratorObj;UserData:Pointer); Overload; Override;
 
     procedure Add(B:Boolean); Overload;
     procedure Add(I:Int64); Overload;
@@ -108,9 +121,11 @@ Type
   Public
     constructor Create(AParent:TJSONarray = Nil);
     Destructor Destroy; Override;
-    Procedure Delete(const Key:WideString);
-    Procedure ForEach(Iterator:TJSONIterator;UserData:Pointer); Overload;
-    Procedure ForEach(Iterator:TJSONIteratorObj;UserData:Pointer); Overload;
+    Procedure Clear; Override;
+    Procedure Delete(const Key:WideString); // delete element and free object
+    Function Remove(const Key:WideString):TJSONbase; // remove element from list and return reference to object
+    Procedure ForEach(Iterator:TJSONIterator;UserData:Pointer); Overload; Override;
+    Procedure ForEach(Iterator:TJSONIteratorObj;UserData:Pointer); Overload; Override;
 
     procedure Add(Key:WideString;B:Boolean); Overload;
     procedure Add(Key:WideString;I:Int64); Overload;
@@ -132,7 +147,7 @@ Resourcestring
   JR_OBJ_VALUE = 'TJSONobject does not have a value by itself - it is an indexed array';
   JR_BAD_TXT = 'Unsupported data type in TJSONbase.Text';
   JR_NO_COUNT = 'TJSONbase is not an array and does not have Count property';
-  JR_PARSE_CHAR = 'Unexpected character at position %d';
+  JR_PARSE_CHAR = 'Unexpected character at position %d - %.20s';
   JR_PARSE_EMPTY = 'Empty element at position %d';
   JR_OPEN_LIST = 'Missing closing bracket for array';
   JR_OPEN_STRING = 'Unterminated string at position %d';
@@ -149,7 +164,7 @@ Resourcestring
 
 implementation
 
-uses Windows,Variants;
+uses Windows,Variants,FastMove,FastInt64;
 
 Const
   MemDelta = 50000;
@@ -216,15 +231,18 @@ end;
 // string escaping and un-escaping
 
 procedure EscapeString(const s:WideString;var Buf:TMemBuf);
+type
+  hex_code = Array[1..4] of AnsiChar;
 var
   i:Integer;
-  code:Array[1..4] of AnsiChar;
+  code:hex_code;
+  code_char:Cardinal absolute code;
 
-  procedure Int2Hex(c:Word); Assembler;
+  function Int2Hex(c:Word):Cardinal; Assembler;
   Asm
-    PUSH AX
+    PUSH EAX
     SHL EAX,16
-    POP AX
+    MOV AX,[ESP]
     MOV AH,AL
 
     AND AL,15
@@ -232,7 +250,7 @@ var
     CMC
     ADC AL,'0'
     DAA
-    MOV [BYTE PTR code+3],AL
+    MOV [ESP+3],AL
 
     MOV AL,AH
     SHR AL,4
@@ -240,7 +258,7 @@ var
     CMC
     ADC AL,'0'
     DAA
-    MOV [BYTE PTR code+2],AL
+    MOV [ESP+2],AL
 
     SHR EAX,16
     MOV AL,AH
@@ -249,7 +267,7 @@ var
     CMC
     ADC AL,'0'
     DAA
-    MOV [BYTE PTR code+1],AL
+    MOV [ESP+1],AL
 
     MOV AL,AH
     SHR AL,4
@@ -257,7 +275,8 @@ var
     CMC
     ADC AL,'0'
     DAA
-    MOV [BYTE PTR code],AL
+    MOV [ESP],AL
+    POP EAX
   end;
 
 Begin
@@ -300,7 +319,7 @@ Begin
       Begin
         mem_char('\',Buf);
         mem_char('u',Buf);
-        Int2Hex(Ord(s[i]));
+        code_char:=Int2Hex(Ord(s[i]));
         mem_write(code,Buf);
       end;
     end;
@@ -541,12 +560,16 @@ end;
 Constructor TJSONarray.Create(AParent:TJSONarray);
 Begin
   Inherited;
-  FItems:=TObjectList.Create;
+  FItems:=TList.Create;
   FItems.Capacity:=8;
 end;
 
 Destructor TJSONarray.Destroy;
+var
+  i:Integer;
 Begin
+  for i:=0 to Pred(FItems.Count) do
+    TObject(FItems[i]).Free;
   FItems.Free;
   Inherited;
 end;
@@ -559,8 +582,12 @@ end;
 
 Procedure TJSONarray.SetItem(Index:Integer;AValue:TJSONbase);
 Begin
-  if (Index>=0)and(Index<FItems.Count) Then FItems[Index]:=AValue
-    else Raise TJSONError.CreateFmt(JR_INDEX,[Index,FItems.Count]);
+  if (Index>=0)and(Index<FItems.Count) Then
+  Begin
+    TObject(FItems[Index]).Free;
+    FItems[Index]:=AValue;
+  end
+  else Raise TJSONError.CreateFmt(JR_INDEX,[Index,FItems.Count]);
 end;
 
 Function TJSONarray.GetCount:Integer;
@@ -593,11 +620,34 @@ end;
 
 procedure TJSONlist.Delete(Idx:Integer);
 Begin
-  if (Idx>=0)and(Idx<FItems.Count) Then FItems.Delete(Idx)
-    else Raise TJSONError.CreateFmt(JR_INDEX,[Idx,FItems.Count]);
+  if (Idx>=0)and(Idx<FItems.Count) Then
+  Begin
+    TObject(FItems[Idx]).Free;
+    FItems.Delete(Idx);
+  end
+  else Raise TJSONError.CreateFmt(JR_INDEX,[Idx,FItems.Count]);
 end;
 
-Procedure TJSONlist.ForEach(Iterator:TJSONlistIterator;UserData:Pointer);
+function TJSONlist.Remove(Idx:Integer):TJSONbase;
+Begin
+  if (Idx>=0)and(Idx<FItems.Count) Then
+  Begin
+    Result:=TJSONbase(FItems[Idx]);
+    FItems.Delete(Idx);
+  end
+  else Raise TJSONError.CreateFmt(JR_INDEX,[Idx,FItems.Count]);
+end;
+
+procedure TJSONlist.Clear;
+Var
+  i:Integer;
+Begin
+  for i:=0 to Pred(FItems.Count) do
+    TObject(FItems[i]).Free;
+  FItems.Clear;
+end;
+
+Procedure TJSONlist.ForEach(Iterator:TJSONEnum;UserData:Pointer);
 var
   i:Integer;
   stop:Boolean;
@@ -611,7 +661,7 @@ Begin
   end;
 end;
 
-Procedure TJSONlist.ForEach(Iterator:TJSONlistIteratorObj;UserData:Pointer);
+Procedure TJSONlist.ForEach(Iterator:TJSONEnumObj;UserData:Pointer);
 var
   i:Integer;
   stop:Boolean;
@@ -621,6 +671,34 @@ Begin
   while (i<FItems.Count) and not stop do
   begin
     Iterator(i,Pointer(FItems[i]),UserData,stop);
+    Inc(i);
+  end;
+end;
+
+Procedure TJSONlist.ForEach(Iterator:TJSONIterator;UserData:Pointer);
+var
+  i:Integer;
+  stop:Boolean;
+Begin
+  i:=0;
+  stop:=False;
+  while (i<FItems.Count) and not stop do
+  begin
+    Iterator(IntToStr(i),Pointer(FItems[i]),UserData,stop);
+    Inc(i);
+  end;
+end;
+
+Procedure TJSONlist.ForEach(Iterator:TJSONIteratorObj;UserData:Pointer);
+var
+  i:Integer;
+  stop:Boolean;
+Begin
+  i:=0;
+  stop:=False;
+  while (i<FItems.Count) and not stop do
+  begin
+    Iterator(IntToStr(i),Pointer(FItems[i]),UserData,stop);
     Inc(i);
   end;
 end;
@@ -767,7 +845,11 @@ Begin
     FItems.Add(AValue);
     FNames.Add(Key);
   end
-  else FItems[Idx]:=AValue;
+  else
+  Begin
+    TObject(FItems[Idx]).Free;
+    FItems[Idx]:=AValue;
+  end;
 end;
 
 Function TJSONobject.GetName(Idx:Integer):WideString;
@@ -804,6 +886,13 @@ Begin
   end;
 end;
 
+procedure TJSONobject.Clear;
+Begin
+  FHash.Clear;
+  FNames.Clear;
+  FItems.Clear;
+end;
+
 procedure TJSONobject.Delete(const Key:WideString);
 var
   Idx:Integer;
@@ -812,6 +901,23 @@ Begin
   Idx:=FHash.Items[Key];
   if Idx<>-1 Then
   Begin
+    FHash.Delete(Key);
+    FNames.Delete(Idx);
+    TObject(FItems[Idx]).Free;
+    FItems.Delete(Idx);
+  end;
+end;
+
+function TJSONobject.Remove(const Key:WideString):TJSONbase;
+var
+  Idx:Integer;
+Begin
+  if Key='' then Raise TJSONError.Create(JR_NO_NAME);
+  Idx:=FHash.Items[Key];
+  Result:=Nil;
+  if Idx<>-1 Then
+  Begin
+    Result:=TJSONbase(FItems[Idx]);
     FHash.Delete(Key);
     FNames.Delete(Idx);
     FItems.Delete(Idx);
@@ -1168,7 +1274,7 @@ var
             Break;
           end;
       Else
-        Raise TJSONError.CreateFmt(JR_PARSE_CHAR,[txt-old_pos]);
+        Raise TJSONError.CreateFmt(JR_PARSE_CHAR,[txt-old_pos,txt]);
       end;
     end;
   end;
@@ -1180,7 +1286,8 @@ Begin
   try
     Result:=ParseRoot(Nil);
     SkipSpace;
-    If txt^ <> #0 Then Raise TJSONError.CreateFmt(JR_PARSE_CHAR,[txt-old_pos]);
+    If txt^ <> #0 Then
+      Raise TJSONError.CreateFmt(JR_PARSE_CHAR,[txt-old_pos,txt]);
   Except
     if Assigned(Result) then FreeAndNil(Result);
     Raise;
