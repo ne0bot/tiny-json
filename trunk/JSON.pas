@@ -15,6 +15,7 @@ unit JSON;
 // 18-Aug-2011  v1.3
 //                   - fixed error in Int2Hex (wrong usage of outer variable CODE)
 //                   - replaced TObjectList with TList, because otherwise REMOVE methods did not function properly
+// 20-Apr-2012  v1.4 - added Result.Free at several places to avoid memory leaks when raising exceptions
 
 interface
 
@@ -143,7 +144,7 @@ Resourcestring
   JR_LIST_NAME = 'TJSONlist use only Integer indexes - not String';
   JR_INDEX = 'Index (%d) is outside the array (%d)';
   JR_NO_INDEX = 'TJSONbase is not an array and does not support indexes';
-  JR_NO_NAME = 'Associative arrays does not support empty index';
+  JR_NO_NAME = 'Associative arrays do not support empty index';
   JR_OBJ_VALUE = 'TJSONobject does not have a value by itself - it is an indexed array';
   JR_BAD_TXT = 'Unsupported data type in TJSONbase.Text';
   JR_NO_COUNT = 'TJSONbase is not an array and does not have Count property';
@@ -1058,14 +1059,23 @@ var
             else if ptr^ = '\' then escaped:=True;
             Inc(ptr);
           end;
-          If ptr^ = #0 then Raise TJSONError.CreateFmt(JR_OPEN_STRING,[txt-old_pos]);
+          If ptr^ = #0 then
+          Begin
+            Result.Free;
+            Raise TJSONError.CreateFmt(JR_OPEN_STRING,[txt-old_pos]);
+          end;
           L:=ptr-txt;
           Result:=TJSONbase.Create(AParent);
           if L>0 then
           begin
             SetLength(s,L);
             StrLCopy(@s[1],txt,L);
-            Result.Value:=UnescapeString(s);
+            try
+              Result.Value:=UnescapeString(s);
+            Except
+              Result.Free;
+              Raise;
+            End;
           end
           else Result.Value:='';
           txt:=ptr+1;
@@ -1113,16 +1123,28 @@ var
           Begin
             is_float:=True;
             Inc(ptr);
-            if Not (ptr^ in ['0'..'9']) then Raise TJSONError.CreateFmt(JR_BAD_FLOAT,[txt-old_pos]);
+            if Not (ptr^ in ['0'..'9']) then
+            Begin
+              Result.Free;
+              Raise TJSONError.CreateFmt(JR_BAD_FLOAT,[txt-old_pos]);
+            end;
             While ptr^ in ['0'..'9'] do Inc(ptr); // rational part
           end;
           if ptr^ in ['e','E'] Then
           Begin
             is_float:=True;
             Inc(ptr);
-            if not (ptr^ in ['-','+','0'..'9']) then Raise TJSONError.CreateFmt(JR_BAD_EXPONENT,[txt-old_pos]);
+            if not (ptr^ in ['-','+','0'..'9']) then
+            Begin
+              Result.Free;
+              Raise TJSONError.CreateFmt(JR_BAD_EXPONENT,[txt-old_pos]);
+            end;
             If ptr^ in ['+','-'] Then Inc(ptr); // exponent sign
-            if not (ptr^ in ['0'..'9']) then Raise TJSONError.CreateFmt(JR_BAD_EXPONENT,[txt-old_pos]);
+            if not (ptr^ in ['0'..'9']) then
+            Begin
+              Result.Free;
+              Raise TJSONError.CreateFmt(JR_BAD_EXPONENT,[txt-old_pos]);
+            end;
             While ptr^ in ['0'..'9'] do Inc(ptr); // exponent
           end;
           L:=ptr-txt;
@@ -1152,24 +1174,40 @@ var
     While txt^ <> #0 Do
     Begin
       SkipSpace;
-      if txt^ = #0 then Raise TJSONError.CreateFmt(JR_OPEN_LIST,[txt-old_pos]);
+      if txt^ = #0 then
+      Begin
+        Result.Free;
+        Raise TJSONError.CreateFmt(JR_OPEN_LIST,[txt-old_pos]);
+      end;
       Case txt^ Of
         ']':
           Begin
-            If need_value then Raise TJSONError.CreateFmt(JR_PARSE_EMPTY,[txt-old_pos]);
+            If need_value then
+            Begin
+              Result.Free;
+              Raise TJSONError.CreateFmt(JR_PARSE_EMPTY,[txt-old_pos]);
+            End;
             Inc(txt);
             Break;
           end;
         ',':
           begin
-            if need_value or (Result.Count=0) then Raise TJSONError.CreateFmt(JR_PARSE_EMPTY,[txt-old_pos]);
+            if need_value or (Result.Count=0) then
+            Begin
+              Result.Free;
+              Raise TJSONError.CreateFmt(JR_PARSE_EMPTY,[txt-old_pos]);
+            end;
             Inc(txt);
             need_value:=True;
           end;
       else
         Begin
           Elem:=ParseBase(Result);
-          If not Assigned(Elem) then Raise TJSONError.CreateFmt(JR_PARSE_EMPTY,[txt-old_pos]);
+          If not Assigned(Elem) then
+          Begin
+            Result.Free;
+            Raise TJSONError.CreateFmt(JR_PARSE_EMPTY,[txt-old_pos]);
+          end;
           Result.Add(Elem);
           need_value:=False;
         end;
@@ -1222,17 +1260,29 @@ var
     While txt^ <> #0 Do
     Begin
       SkipSpace;
-      if txt^ = #0 then Raise TJSONError.CreateFmt(JR_OPEN_LIST,[txt-old_pos]);
+      if txt^ = #0 then
+      Begin
+        Result.Free;
+        Raise TJSONError.CreateFmt(JR_OPEN_LIST,[txt-old_pos]);
+      end;
       Case txt^ Of
         '}':
           Begin
-            If need_value then Raise TJSONError.CreateFmt(JR_PARSE_EMPTY,[txt-old_pos]);
+            If need_value then
+            Begin
+              Result.Free;
+              Raise TJSONError.CreateFmt(JR_PARSE_EMPTY,[txt-old_pos]);
+            end;
             Inc(txt);
             Break;
           end;
         ',':
           begin
-            if need_value or (Result.Count=0) then Raise TJSONError.CreateFmt(JR_PARSE_EMPTY,[txt-old_pos]);
+            if need_value or (Result.Count=0) then
+            Begin
+              Result.Free;
+              Raise TJSONError.CreateFmt(JR_PARSE_EMPTY,[txt-old_pos]);
+            end;
             Inc(txt);
             need_value:=True;
           end;
@@ -1240,12 +1290,24 @@ var
         Begin
           Title:=ParseName;
           SkipSpace;
-          If txt^ <> ':' then Raise TJSONError.CreateFmt(JR_NO_COLON,[txt-old_pos]);
+          If txt^ <> ':' then
+          Begin
+            Result.Free;
+            Raise TJSONError.CreateFmt(JR_NO_COLON,[txt-old_pos]);
+          end;
           Inc(txt);
           SkipSpace;
-          if txt^ in [',','}'] then raise TJSONError.CreateFmt(JR_NO_VALUE,[txt-old_pos]);
+          if txt^ in [',','}'] then
+          Begin
+            Result.Free;
+            Raise TJSONError.CreateFmt(JR_NO_VALUE,[txt-old_pos]);
+          end;
           Elem:=ParseBase(Result);
-          If not Assigned(Elem) then Raise TJSONError.CreateFmt(JR_PARSE_EMPTY,[txt-old_pos]);
+          If not Assigned(Elem) then
+          Begin
+            Result.Free;
+            Raise TJSONError.CreateFmt(JR_PARSE_EMPTY,[txt-old_pos]);
+          end;
           Result.Add(Title,Elem);
           need_value:=False;
         end;
@@ -1274,6 +1336,7 @@ var
             Break;
           end;
       Else
+        Result.Free;
         Raise TJSONError.CreateFmt(JR_PARSE_CHAR,[txt-old_pos,txt]);
       end;
     end;
@@ -1282,20 +1345,23 @@ var
 Begin
   txt:=old_pos;
   Result:=Nil;
-  if txt<>NIL then 
+  if txt<>NIL then
   try
     Result:=ParseRoot(Nil);
     SkipSpace;
     If txt^ <> #0 Then
+    begin
+      Result.Free;
       Raise TJSONError.CreateFmt(JR_PARSE_CHAR,[txt-old_pos,txt]);
+    End;
   Except
-    if Assigned(Result) then FreeAndNil(Result);
+    Result.Free;
     Raise;
   End;
 end;
 
 Initialization
-  GetLocaleFormatSettings(GetSystemDefaultLCID,fmt);
+  GetLocaleFormatSettings(GetUserDefaultLCID,fmt);
   fmt.DecimalSeparator:='.';
   fmt.ThousandSeparator:=#0;
 
